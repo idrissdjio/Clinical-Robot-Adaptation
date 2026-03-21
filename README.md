@@ -229,4 +229,4 @@ This project will be released under the MIT License. All benchmark definitions, 
 
 Idriss Djiofack Teledjieu
 Framingham, MA
-[GitHub] [LinkedIn] [Email]
+[[Github](https://github.com/idrissdjio)] [[LinkedIn](https://www.linkedin.com/in/idrissdjio/)] [Email](djiofackidriss@gmail.com)

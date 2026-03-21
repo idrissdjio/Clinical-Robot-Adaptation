@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# Virtual environments
+clinadapt_env/
+venv/
+env/
+
+# Data
+data/datasets/
+*.hdf5
+*.pkl
+*.npy
+
+# Model weights
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+
+# Logs
+experiments/logs/
+benchmark/results/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
