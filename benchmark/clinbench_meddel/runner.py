@@ -71,6 +71,11 @@ logger = logging.getLogger(__name__)
 # Suppress warnings
 warnings.filterwarnings('ignore')
 
+# Performance monitoring imports
+import psutil
+import threading
+from concurrent.futures import ThreadPoolExecutor
+
 
 class ClinBenchMedDel:
     """

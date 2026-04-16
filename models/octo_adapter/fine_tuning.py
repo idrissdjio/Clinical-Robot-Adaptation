@@ -42,6 +42,10 @@ import seaborn as sns
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
 from sklearn.model_selection import train_test_split
 
+# Performance optimization imports
+import gc
+from torch.profiler import profile, record_function, ProfilerActivity
+
 # Octo-specific imports
 from transformers import AutoTokenizer, AutoModel
 from einops import rearrange, repeat

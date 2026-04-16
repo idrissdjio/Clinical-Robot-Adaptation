@@ -20,11 +20,18 @@ import os
 import sys
 import argparse
 import logging
+import json
+import time
+import pickle
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional, Any, Union
-import json
-import pickle
+import warnings
+
+# Memory optimization imports
+import psutil
+import gc
+from memory_profiler import profile
 import h5py
 import warnings
 
