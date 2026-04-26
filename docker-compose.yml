@@ -1,0 +1,260 @@
+version: '3.8'
+
+services:
+  # Main API Service
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    container_name: clinical-robot-api
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONPATH=/app
+      - CUDA_VISIBLE_DEVICES=""
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=postgresql://clinical:password@postgres:5432/clinical_robot
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./logs:/app/logs
+      - ./results:/app/results
+    depends_on:
+      - redis
+      - postgres
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - clinical-network
+
+  # Visualization Dashboard
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    container_name: clinical-robot-dashboard
+    ports:
+      - "8501:8501"
+    environment:
+      - PYTHONPATH=/app
+      - API_BASE_URL=http://api:8000
+    command: streamlit run dashboard/visualization_dashboard.py --server.port=8501 --server.address=0.0.0.0
+    volumes:
+      - ./dashboard:/app/dashboard
+      - ./data:/app/data
+    depends_on:
+      - api
+    restart: unless-stopped
+    networks:
+      - clinical-network
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: clinical-robot-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - clinical-network
+
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: clinical-robot-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_DB=clinical_robot
+      - POSTGRES_USER=clinical
+      - POSTGRES_PASSWORD=password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/init.sql
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U clinical -d clinical_robot"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - clinical-network
+
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    container_name: clinical-robot-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ./nginx/ssl:/etc/nginx/ssl
+      - ./logs/nginx:/var/log/nginx
+    depends_on:
+      - api
+      - dashboard
+    restart: unless-stopped
+    networks:
+      - clinical-network
+
+  # Prometheus Monitoring
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: clinical-robot-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    restart: unless-stopped
+    networks:
+      - clinical-network
+
+  # Grafana Visualization
+  grafana:
+    image: grafana/grafana:latest
+    container_name: clinical-robot-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    networks:
+      - clinical-network
+
+  # Jupyter Development Environment
+  jupyter:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: development
+    container_name: clinical-robot-jupyter
+    ports:
+      - "8888:8888"
+    environment:
+      - PYTHONPATH=/app
+      - JUPYTER_ENABLE_LAB=yes
+    volumes:
+      - ./:/app
+      - jupyter_data:/home/clinical/.jupyter
+    command: jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root --NotebookApp.token=''
+    restart: unless-stopped
+    networks:
+      - clinical-network
+
+  # Background Worker
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    container_name: clinical-robot-worker
+    environment:
+      - PYTHONPATH=/app
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=postgresql://clinical:password@postgres:5432/clinical_robot
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./logs:/app/logs
+    depends_on:
+      - redis
+      - postgres
+    command: python -m celery -A api.celery_app worker --loglevel=info
+    restart: unless-stopped
+    networks:
+      - clinical-network
+
+  # Celery Beat Scheduler
+  scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    container_name: clinical-robot-scheduler
+    environment:
+      - PYTHONPATH=/app
+      - REDIS_URL=redis://redis:6379
+    volumes:
+      - ./logs:/app/logs
+    depends_on:
+      - redis
+    command: python -m celery -A api.celery_app beat --loglevel=info
+    restart: unless-stopped
+    networks:
+      - clinical-network
+
+  # Model Training Service
+  trainer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    container_name: clinical-robot-trainer
+    environment:
+      - PYTHONPATH=/app
+      - CUDA_VISIBLE_DEVICES=0
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./logs:/app/logs
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    command: python -m models.training_service
+    restart: unless-stopped
+    networks:
+      - clinical-network
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+  jupyter_data:
+    driver: local
+
+networks:
+  clinical-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

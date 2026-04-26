@@ -1,0 +1,587 @@
+name: Clinical Robot Adaptation CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  release:
+    types: [ published ]
+
+env:
+  PYTHON_VERSION: "3.9"
+  NODE_VERSION: "18"
+
+jobs:
+  # Code Quality and Testing
+  test:
+    name: Test Suite
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: [3.8, 3.9, "3.10"]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+    
+    - name: Cache pip dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ matrix.python-version }}-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-${{ matrix.python-version }}-
+          ${{ runner.os }}-pip-
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pytest pytest-cov pytest-mock flake8 black isort mypy
+        pip install -e .
+    
+    - name: Lint with flake8
+      run: |
+        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+    
+    - name: Check code formatting with black
+      run: |
+        black --check --diff .
+    
+    - name: Check import sorting with isort
+      run: |
+        isort --check-only --diff .
+    
+    - name: Type checking with mypy
+      run: |
+        mypy --ignore-missing-imports --strict-optional models/ scripts/ benchmark/
+    
+    - name: Run unit tests
+      run: |
+        pytest tests/unit/ -v --cov=models --cov=scripts --cov=benchmark --cov-report=xml --cov-report=html
+    
+    - name: Run integration tests
+      run: |
+        pytest tests/integration/ -v --cov-append --cov-report=xml
+    
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.xml
+        flags: unittests
+        name: codecov-umbrella
+        fail_ci_if_error: false
+
+  # MATLAB Testing
+  test-matlab:
+    name: MATLAB Tests
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up MATLAB
+      uses: matlab-actions/setup-matlab@v1
+      with:
+        release: R2023b
+    
+    - name: Run MATLAB tests
+      uses: matlab-actions/run-matlab-test@v1
+      with:
+        test-results-pdf: test-results.pdf
+        code-coverage: true
+        test-results-artifact: matlab-test-results
+        coverage-artifact: matlab-coverage
+    
+    - name: Publish MATLAB test results
+      uses: dorny/test-reporter@v1
+      if: success() || failure()
+      with:
+        name: MATLAB Test Results
+        path: matlab-test-results/*.junit
+        reporter: java-junit
+
+  # Security Scanning
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+    
+    - name: Install security tools
+      run: |
+        pip install bandit safety semgrep
+    
+    - name: Run Bandit security linter
+      run: |
+        bandit -r . -f json -o bandit-report.json || true
+        bandit -r . -f txt -o bandit-report.txt
+    
+    - name: Run Safety check
+      run: |
+        safety check --json --output safety-report.json || true
+        safety check --text --output safety-report.txt
+    
+    - name: Run Semgrep
+      run: |
+        semgrep --config=auto --json --output=semgrep-report.json || true
+        semgrep --config=auto --text --output=semgrep-report.txt
+    
+    - name: Upload security reports
+      uses: actions/upload-artifact@v3
+      with:
+        name: security-reports
+        path: |
+          bandit-report.*
+          safety-report.*
+          semgrep-report.*
+
+  # Docker Build and Test
+  docker:
+    name: Docker Build
+    runs-on: ubuntu-latest
+    needs: [test]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    
+    - name: Login to Docker Hub
+      if: github.event_name != 'pull_request'
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKER_USERNAME }}
+        password: ${{ secrets.DOCKER_PASSWORD }}
+    
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: idrissdjio/clinical-robot-adaptation
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
+    
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        platforms: linux/amd64,linux/arm64
+        push: ${{ github.event_name != 'pull_request' }}
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+    
+    - name: Test Docker image
+      run: |
+        docker run --rm idrissdjio/clinical-robot-adaptation:latest python -c "import models; print('Docker image test passed')"
+
+  # Documentation Build
+  docs:
+    name: Documentation
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+    
+    - name: Install documentation dependencies
+      run: |
+        pip install sphinx sphinx-rtd-theme sphinx-autodoc-typehints myst-parser
+        pip install -r requirements.txt
+    
+    - name: Build documentation
+      run: |
+        cd docs
+        make html
+    
+    - name: Upload documentation artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: documentation
+        path: docs/_build/html/
+
+  # Performance Benchmarking
+  benchmark:
+    name: Performance Benchmarks
+    runs-on: ubuntu-latest
+    needs: [test]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+    
+    - name: Install dependencies
+      run: |
+        pip install -r requirements.txt
+        pip install pytest-benchmark
+    
+    - name: Run performance benchmarks
+      run: |
+        pytest tests/benchmark/ --benchmark-json=benchmark-results.json --benchmark-only
+    
+    - name: Upload benchmark results
+      uses: actions/upload-artifact@v3
+      with:
+        name: benchmark-results
+        path: benchmark-results.json
+    
+    - name: Store benchmark result
+      uses: benchmark-action/github-action-benchmark@v1
+      with:
+        tool: 'pytest'
+        output-file-path: benchmark-results.json
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        auto-push: true
+
+  # API Testing
+  api-test:
+    name: API Integration Tests
+    runs-on: ubuntu-latest
+    needs: [docker]
+    
+    services:
+      api:
+        image: idrissdjio/clinical-robot-adaptation:latest
+        ports:
+          - 8000:8000
+        options: >-
+          --health-cmd "curl -f http://localhost:8000/health || exit 1"
+          --health-interval 30s
+          --health-timeout 10s
+          --health-retries 5
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+    
+    - name: Install API testing dependencies
+      run: |
+        pip install requests pytest-httpx
+    
+    - name: Wait for API to be ready
+      run: |
+        timeout 300 bash -c 'until curl -f http://localhost:8000/health; do sleep 5; done'
+    
+    - name: Run API tests
+      run: |
+        pytest tests/api/ -v --api-url=http://localhost:8000
+
+  # Dashboard Testing
+  dashboard-test:
+    name: Dashboard Tests
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+    
+    - name: Install dashboard dependencies
+      run: |
+        cd dashboard
+        npm install
+    
+    - name: Run dashboard tests
+      run: |
+        cd dashboard
+        npm test -- --coverage --watchAll=false
+    
+    - name: Build dashboard
+      run: |
+        cd dashboard
+        npm run build
+    
+    - name: Upload dashboard artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: dashboard-build
+        path: dashboard/build/
+
+  # Release and Deployment
+  deploy:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [test, test-matlab, security, docker, docs, benchmark, api-test, dashboard-test]
+    if: github.event_name == 'release' && github.event.action == 'published'
+    
+    environment: production
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Deploy to production
+      run: |
+        echo "Deploying to production..."
+        # Add deployment logic here
+    
+    - name: Run smoke tests
+      run: |
+        echo "Running smoke tests..."
+        # Add smoke test logic here
+    
+    - name: Notify deployment
+      uses: 8398a7/action-slack@v3
+      with:
+        status: ${{ job.status }}
+        channel: '#deployments'
+        text: 'Clinical Robot Adaptation deployed to production!'
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  # CLI Testing
+  cli-test:
+    name: CLI Tests
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+    
+    - name: Install CLI dependencies
+      run: |
+        pip install -r requirements.txt
+        pip install click rich pytest
+        pip install -e .
+    
+    - name: Test CLI installation
+      run: |
+        clinical-robot --version
+    
+    - name: Test CLI commands
+      run: |
+        clinical-robot status
+        clinical-robot model list
+        clinical-robot config
+    
+    - name: Run CLI integration tests
+      run: |
+        pytest tests/cli/ -v
+
+  # Data Pipeline Testing
+  data-pipeline:
+    name: Data Pipeline Tests
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+    
+    - name: Install data pipeline dependencies
+      run: |
+        pip install -r requirements.txt
+        pip install pytest-pandas pytest-hdf5
+    
+    - name: Create test data
+      run: |
+        mkdir -p test_data/raw
+        python -c "
+        import json
+        import numpy as np
+        from datetime import datetime
+        
+        # Generate test demonstration data
+        demo = {
+            'id': 'test_demo_001',
+            'timestamp': datetime.now().isoformat(),
+            'instruction': 'Pick up medication vial',
+            'robot_state': np.random.randn(10).tolist(),
+            'action': np.random.randn(7).tolist(),
+            'success': True,
+            'medication_type': 'vial'
+        }
+        
+        with open('test_data/raw/demo_001.json', 'w') as f:
+            json.dump(demo, f)
+        "
+    
+    - name: Test data processing pipeline
+      run: |
+        clinical-robot data process --input-dir test_data/raw --output-dir test_data/processed --validate
+    
+    - name: Test data generation
+      run: |
+        clinical-robot data generate --demonstrations 10 --output test_data/synthetic.json --format json
+    
+    - name: Test data analysis
+      run: |
+        clinical-robot data analyze --data-path test_data/synthetic.json --output test_data/analysis
+    
+    - name: Run data pipeline tests
+      run: |
+        pytest tests/data/ -v
+
+  # Model Training Test
+  model-training:
+    name: Model Training Test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+    
+    - name: Install training dependencies
+      run: |
+        pip install -r requirements.txt
+        pip install torch torchvision
+    
+    - name: Create test dataset
+      run: |
+        mkdir -p test_data
+        python -c "
+        import h5py
+        import numpy as np
+        
+        # Create minimal test dataset
+        with h5py.File('test_data/test_dataset.hdf5', 'w') as f:
+            # Create a few demonstrations
+            for i in range(5):
+                grp = f.create_group(f'demo_{i:03d}')
+                grp.create_dataset('observations', data=np.random.randn(10, 224, 224, 3))
+                grp.create_dataset('actions', data=np.random.randn(10, 7))
+                grp.create_dataset('rewards', data=np.random.randn(10))
+                grp.attrs['success'] = True
+                grp.attrs['medication_type'] = 'vial'
+        "
+    
+    - name: Test model training (quick run)
+      run: |
+        # Quick training test with minimal steps
+        python -c "
+        import sys
+        sys.path.append('.')
+        from models.octo_adapter.fine_tuning import ClinicalOctoAdapter
+        
+        # Test initialization
+        config = {'device': 'cpu', 'batch_size': 2}
+        adapter = ClinicalOctoAdapter(None, config)
+        
+        # Test dataset preparation
+        dataset = adapter.prepare_clinical_dataset('test_data/test_dataset.hdf5')
+        print(f'Dataset prepared with {len(dataset)} demonstrations')
+        
+        # Test quick fine-tuning
+        results = adapter.finetune(dataset, num_steps=10)
+        print('Quick training test passed')
+        "
+
+  # End-to-End Integration Test
+  e2e-test:
+    name: End-to-End Integration Test
+    runs-on: ubuntu-latest
+    needs: [cli-test, data-pipeline, api-test]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+    
+    - name: Install all dependencies
+      run: |
+        pip install -r requirements.txt
+        pip install -e .
+    
+    - name: Run complete E2E workflow
+      run: |
+        echo "Starting end-to-end integration test..."
+        
+        # 1. Generate test data
+        clinical-robot data generate --demonstrations 20 --output e2e_test_data.json --format json
+        
+        # 2. Process data
+        clinical-robot data process --input-dir . --output-dir e2e_processed --validate
+        
+        # 3. Run simulation
+        clinical-robot sim run --scenario standard_workflow_beginner --output e2e_simulation --headless
+        
+        # 4. Test CLI status
+        clinical-robot status
+        
+        echo "End-to-end integration test completed successfully!"
+
+# Workflow completion notification
+jobs:
+  notify:
+    name: Notify Workflow Completion
+    runs-on: ubuntu-latest
+    needs: [test, test-matlab, security, docker, docs, benchmark, api-test, dashboard-test, cli-test, data-pipeline, e2e-test]
+    if: always()
+    
+    steps:
+    - name: Notify success
+      if: ${{ needs.test.result == 'success' && needs.docker.result == 'success' }}
+      run: |
+        echo "✅ All critical workflows completed successfully!"
+    
+    - name: Notify failure
+      if: ${{ needs.test.result == 'failure' || needs.docker.result == 'failure' }}
+      run: |
+        echo "❌ One or more critical workflows failed!"
+        exit 1
